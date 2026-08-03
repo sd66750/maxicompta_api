@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.env
+# Fichier de configuration chiffré (chaîne de connexion) — ne jamais versionner
+data/connections.enc.json
+server.log
+scripts/_registry-debug.txt
