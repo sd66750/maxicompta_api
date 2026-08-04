@@ -1,0 +1,13 @@
+# Ne jamais copier dans l'image :
+node_modules
+dist
+.git
+.gitignore
+# Secrets et données locales (restent sur le VPS via env_file + volume) :
+.env
+.env.*
+data
+# Divers
+*.log
+Dockerfile
+.dockerignore
