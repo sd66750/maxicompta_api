@@ -1,6 +1,6 @@
 import mssql from 'mssql';
 import { parseSqlConnectionString } from '../config/connectionString.js';
-import { getActiveConnectionString } from '../config/connectionStore.js';
+import { getActiveConnectionString, getServerConnectionString, withDatabase } from '../config/connectionStore.js';
 
 /**
  * Cache de pools de connexion `mssql`, indexé par InitialCatalog (base).
@@ -52,6 +52,34 @@ export async function getCurrentDatabaseName(): Promise<string | undefined> {
   const raw = await getActiveConnectionString();
   if (!raw) return undefined;
   return parseSqlConnectionString(raw).database;
+}
+
+/**
+ * Découvre les sociétés = bases `PrismaSoft_%` ONLINE sur le serveur configuré.
+ * Se connecte à `master` (pool dédié, mis en cache) — indépendant de la société active.
+ */
+export async function listSocietes(): Promise<string[]> {
+  const server = await getServerConnectionString();
+  if (!server) throw new ConnectionNotConfiguredError();
+
+  const config = parseSqlConnectionString(withDatabase(server, 'master'));
+  const key = `${config.server}/master`;
+
+  let pool = pools.get(key);
+  if (!pool || (!pool.connected && !pool.connecting)) {
+    pool = new mssql.ConnectionPool(config);
+    pool.on('error', (err) => {
+      console.error('[pool:master] Erreur :', err.message);
+      pools.delete(key);
+    });
+    await pool.connect();
+    pools.set(key, pool);
+  }
+
+  const result = await pool.request().query<{ name: string }>(
+    "SELECT name FROM sys.databases WHERE name LIKE 'PrismaSoft\\_%' ESCAPE '\\' AND state = 0 ORDER BY name"
+  );
+  return result.recordset.map((r) => r.name);
 }
 
 /** Teste une chaîne de connexion arbitraire sans la persister ni la mettre en cache. */
