@@ -10,14 +10,21 @@ declare global {
   }
 }
 
-/** Exige un JWT valide dans l'en-tête Authorization: Bearer <token>. */
+/**
+ * Exige un JWT valide. Transporté par l'en-tête dédié `X-Auth-Token` (pour ne pas
+ * entrer en conflit avec le `Authorization: Basic` du reverse-proxy) ; on accepte
+ * aussi `Authorization: Bearer <token>` en repli.
+ */
 export function requireAuth(req: Request, res: Response, next: NextFunction): void {
-  const header = req.headers.authorization;
-  if (!header || !header.startsWith('Bearer ')) {
+  const custom = req.headers['x-auth-token'];
+  const bearer = req.headers.authorization?.startsWith('Bearer ')
+    ? req.headers.authorization.slice('Bearer '.length)
+    : undefined;
+  const token = (typeof custom === 'string' && custom) || bearer;
+  if (!token) {
     res.status(401).json({ error: 'Authentification requise.' });
     return;
   }
-  const token = header.slice('Bearer '.length);
   try {
     req.user = verifyToken(token);
     next();
