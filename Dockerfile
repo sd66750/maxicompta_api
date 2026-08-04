@@ -3,7 +3,7 @@
 # Écoute sur le port 3000 — attendu par traefik (loadbalancer.server.port=3000).
 
 # ---- Étape build : compilation TypeScript ----
-FROM node:20-alpine AS build
+FROM node:22-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
@@ -11,7 +11,7 @@ COPY . .
 RUN npm run build
 
 # ---- Étape runtime : dépendances de prod uniquement ----
-FROM node:20-alpine AS runtime
+FROM node:22-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3000
