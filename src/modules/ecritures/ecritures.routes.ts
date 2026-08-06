@@ -33,6 +33,58 @@ ecrituresRouter.get(
   })
 );
 
+/**
+ * POST /api/ecritures/periodes — ouvre (crée) la période d'un mois de l'exercice.
+ * Corps : { idClient, annee, mois }. La table prismaCompta_periode est GLOBALE
+ * (une ligne par mois, partagée entre sociétés) : si le mois existe déjà, on
+ * renvoie la ligne existante (idempotent). Date fixée au 15 du mois (comme le
+ * legacy) pour éviter tout décalage de bord de mois (fuseau).
+ */
+ecrituresRouter.post(
+  '/periodes',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const { idClient, annee, mois } = z
+      .object({
+        idClient: z.coerce.number().int(),
+        annee: z.coerce.number().int().min(2000).max(2100),
+        mois: z.coerce.number().int().min(1).max(12),
+      })
+      .parse(req.body);
+
+    // Bornes de l'exercice en année/mois (sans ambiguïté de fuseau).
+    const bornes = await query<{ yd: number; md: number; yf: number; mf: number }>(
+      `SELECT YEAR(exerciceDebut) AS yd, MONTH(exerciceDebut) AS md,
+              YEAR(exerciceFin)   AS yf, MONTH(exerciceFin)   AS mf
+         FROM prismaCompta_client WHERE id = @idClient`,
+      { idClient }
+    );
+    if (!bornes[0]) throw new HttpError(404, 'Exercice introuvable.');
+    const { yd, md, yf, mf } = bornes[0];
+    const cible = annee * 12 + (mois - 1);
+    if (cible < yd * 12 + (md - 1) || cible > yf * 12 + (mf - 1)) {
+      throw new HttpError(400, "Ce mois est hors de l'exercice courant.");
+    }
+
+    // Table globale : réutilise la période du mois si elle existe déjà.
+    const existing = await query<{ id: number }>(
+      `SELECT TOP 1 id FROM prismaCompta_periode WHERE YEAR(periode) = @annee AND MONTH(periode) = @mois`,
+      { annee, mois }
+    );
+    if (existing[0]) {
+      res.json({ id: existing[0].id, created: false });
+      return;
+    }
+    const date = `${annee}-${String(mois).padStart(2, '0')}-15`;
+    const ins = await query<{ id: number }>(
+      `INSERT INTO prismaCompta_periode (periode) VALUES (@date);
+       SELECT CAST(SCOPE_IDENTITY() AS int) AS id;`,
+      { date }
+    );
+    res.status(201).json({ id: ins[0]?.id, created: true });
+  })
+);
+
 /** GET /api/ecritures?idClient=&journal=&idPeriode= — liste avec totaux. */
 ecrituresRouter.get(
   '/',
