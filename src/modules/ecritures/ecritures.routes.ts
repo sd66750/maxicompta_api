@@ -75,11 +75,13 @@ ecrituresRouter.post(
       res.json({ id: existing[0].id, created: false });
       return;
     }
-    const date = `${annee}-${String(mois).padStart(2, '0')}-15`;
+    // DATEFROMPARTS : construit la date côté SQL, sans ambiguïté de format. Une
+    // chaîne 'YYYY-MM-DD' serait interprétée selon la langue de session (français
+    // = DMY → le 1er nombre lu comme jour = 2026 → « out-of-range »).
     const ins = await query<{ id: number }>(
-      `INSERT INTO prismaCompta_periode (periode) VALUES (@date);
+      `INSERT INTO prismaCompta_periode (periode) VALUES (DATEFROMPARTS(@annee, @mois, 15));
        SELECT CAST(SCOPE_IDENTITY() AS int) AS id;`,
-      { date }
+      { annee, mois }
     );
     res.status(201).json({ id: ins[0]?.id, created: true });
   })
