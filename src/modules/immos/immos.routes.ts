@@ -32,6 +32,93 @@ immosRouter.get(
   })
 );
 
+/**
+ * GET /api/immos/amortissements?dateButoir=YYYY-MM-DD
+ * Matrice des amortissements : par immo, dotation annuelle par année.
+ * Source = table `..._reprise` (montants RÉELLEMENT comptabilisés par PrismaSoft,
+ * base jours réels/365) pour les années passées ; calcul linéaire pour les années
+ * futures (au-delà de la dernière reprise), avec prorata de l'année butoir
+ * (jours réels/365). Total ligne = cumul d'amortissement à la date butoir.
+ */
+immosRouter.get(
+  '/amortissements',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const { dateButoir } = z.object({ dateButoir: z.string().optional() }).parse(req.query);
+    const butoir = dateButoir ? new Date(dateButoir) : new Date();
+    const butoirYear = butoir.getUTCFullYear();
+    const estFinAnnee = butoir.getUTCMonth() === 11 && butoir.getUTCDate() === 31;
+    const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
+    const jour = (d: Date) => Math.floor(d.getTime() / 86400000);
+
+    const immos = await query<{ id: number; code: string; libelle: string; valeurAchat: number; mes: string | null; duree: number | null; taux: number | null }>(
+      `SELECT id, LTRIM(RTRIM(code)) AS code, libelle, valeurAchat,
+              CONVERT(varchar, dateMiseEnService, 23) AS mes,
+              amortissementDuree AS duree, amortissementTaux AS taux
+         FROM PrismaCompta_Immo_Immobilisation
+        WHERE ISNULL(isSupprimeImmo, 0) = 0 AND ISNULL(isActive, 1) = 1
+        ORDER BY TRY_CAST(code AS INT), code`
+    );
+    const reprises = await query<{ idImmobilisation: number; annee: number; cumul: number }>(
+      `SELECT idImmobilisation, YEAR(dateReprise) AS annee, valeurReprise AS cumul
+         FROM PrismaCompta_Immo_Immobilisation_reprise ORDER BY idImmobilisation, dateReprise`
+    );
+    const repriseMap = new Map<number, { annee: number; cumul: number }[]>();
+    for (const r of reprises) {
+      const arr = repriseMap.get(r.idImmobilisation) ?? [];
+      arr.push({ annee: r.annee, cumul: Number(r.cumul) });
+      repriseMap.set(r.idImmobilisation, arr);
+    }
+
+    const anneesSet = new Set<number>();
+    const lignes = immos.map((im) => {
+      const base = Number(im.valeurAchat) || 0;
+      const tauxFr = im.taux ? Number(im.taux) / 100 : im.duree ? 1 / Number(im.duree) : 0;
+      const annuite = base * tauxFr;
+      const rep = (repriseMap.get(im.id) ?? []).filter((r) => r.annee <= butoirYear).sort((a, b) => a.annee - b.annee);
+      const dotations: Record<number, number> = {};
+      let cumul = 0;
+      let lastYear: number | null = null;
+      for (const r of rep) {
+        const dot = round2(r.cumul - cumul);
+        dotations[r.annee] = dot;
+        anneesSet.add(r.annee);
+        cumul = r.cumul;
+        lastYear = r.annee;
+      }
+      // Années futures (au-delà de la reprise) jusqu'au butoir.
+      const mesYear = im.mes ? Number(im.mes.slice(0, 4)) : butoirYear;
+      let y = lastYear !== null ? lastYear + 1 : mesYear;
+      while (y <= butoirYear && cumul < base - 0.005 && annuite > 0) {
+        let dot: number;
+        const debutAnnee = lastYear === null && y === mesYear && im.mes ? new Date(im.mes) : new Date(Date.UTC(y, 0, 1));
+        if (y === butoirYear && !estFinAnnee) {
+          const jours = Math.max(0, jour(butoir) - jour(debutAnnee) + 1);
+          dot = annuite * (jours / 365);
+        } else if (lastYear === null && y === mesYear && im.mes) {
+          const jours = jour(new Date(Date.UTC(y, 11, 31))) - jour(new Date(im.mes)) + 1;
+          dot = annuite * (jours / 365);
+        } else {
+          dot = annuite;
+        }
+        dot = round2(Math.min(dot, base - cumul));
+        if (dot > 0) {
+          dotations[y] = dot;
+          anneesSet.add(y);
+          cumul = round2(cumul + dot);
+        }
+        y++;
+      }
+      return { id: im.id, code: im.code, libelle: (im.libelle || '').trim(), valeurAchat: base, dotations, cumul: round2(cumul), vnc: round2(base - cumul) };
+    });
+
+    const annees = [...anneesSet].sort((a, b) => a - b);
+    const totauxParAnnee: Record<number, number> = {};
+    for (const a of annees) totauxParAnnee[a] = round2(lignes.reduce((s, l) => s + (l.dotations[a] || 0), 0));
+    res.json({ annees, lignes, totauxParAnnee, dateButoir: dateButoir ?? null });
+  })
+);
+
 /** GET /api/immos/familles — familles d'immobilisations. */
 immosRouter.get(
   '/familles',
