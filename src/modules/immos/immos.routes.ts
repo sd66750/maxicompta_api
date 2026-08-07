@@ -51,13 +51,15 @@ immosRouter.get(
     const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
     const jour = (d: Date) => Math.floor(d.getTime() / 86400000);
 
-    const immos = await query<{ id: number; code: string; libelle: string; valeurAchat: number; mes: string | null; duree: number | null; taux: number | null }>(
-      `SELECT id, LTRIM(RTRIM(code)) AS code, libelle, valeurAchat,
-              CONVERT(varchar, dateMiseEnService, 23) AS mes,
-              amortissementDuree AS duree, amortissementTaux AS taux
-         FROM PrismaCompta_Immo_Immobilisation
-        WHERE ISNULL(isSupprimeImmo, 0) = 0 AND ISNULL(isActive, 1) = 1
-        ORDER BY TRY_CAST(code AS INT), code`
+    const immos = await query<{ id: number; code: string; libelle: string; valeurAchat: number; mes: string | null; duree: number | null; taux: number | null; famille: string | null }>(
+      `SELECT i.id, LTRIM(RTRIM(i.code)) AS code, i.libelle, i.valeurAchat,
+              CONVERT(varchar, i.dateMiseEnService, 23) AS mes,
+              i.amortissementDuree AS duree, i.amortissementTaux AS taux,
+              f.libelle AS famille
+         FROM PrismaCompta_Immo_Immobilisation i
+         LEFT JOIN PrismaCompta_Immo_FamilleImmobilisation f ON f.id = i.idFamilleImmobilisations
+        WHERE ISNULL(i.isSupprimeImmo, 0) = 0 AND ISNULL(i.isActive, 1) = 1
+        ORDER BY f.libelle, TRY_CAST(i.code AS INT), i.code`
     );
     const reprises = await query<{ idImmobilisation: number; annee: number; cumul: number }>(
       `SELECT idImmobilisation, YEAR(dateReprise) AS annee, valeurReprise AS cumul
@@ -109,7 +111,7 @@ immosRouter.get(
         }
         y++;
       }
-      return { id: im.id, code: im.code, libelle: (im.libelle || '').trim(), valeurAchat: base, dotations, cumul: round2(cumul), vnc: round2(base - cumul) };
+      return { id: im.id, code: im.code, libelle: (im.libelle || '').trim(), famille: im.famille?.trim() || null, valeurAchat: base, dotations, cumul: round2(cumul), vnc: round2(base - cumul) };
     });
 
     const annees = [...anneesSet].sort((a, b) => a - b);
