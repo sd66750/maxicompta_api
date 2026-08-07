@@ -9,12 +9,17 @@ import { getActiveConnectionString, getServerConnectionString, withDatabase } fr
 const pools = new Map<string, mssql.ConnectionPool>();
 
 /**
- * La base PrismaSoft est en français : les triggers (onInsertEcritureLigne,
- * onUpdateEcriture…) reconstruisent une date par concaténation `jour/mois/année`
- * puis `CONVERT(datetime, …)`, ce qui suppose le format **dmy**. Or la connexion
- * Node ouvre la session en us_english (mdy) → « 16/01/2025 » interprété mois=16
- * → « conversion out-of-range ». On force donc dmy sur chaque batch (même lot,
- * pas d'aller-retour réseau supplémentaire) ; sans effet sur les SELECT.
+ * `SET DATEFORMAT dmy` UNIQUEMENT pour l'enregistrement d'écriture (withTransaction).
+ * Les triggers legacy (onInsertEcritureLigne, onUpdateEcriture…) reconstruisent
+ * `dateEcritureLigne` par concaténation `jour/mois/année` puis `CONVERT(datetime, …)`,
+ * ce qui suppose **dmy** (sinon « 16/01/2025 » → mois=16 → out-of-range).
+ *
+ * ⚠️ NE PAS l'appliquer aux requêtes générales : dmy CASSE les dates ISO
+ * `YYYY-MM-DD` passées en paramètre (ex. filtre du rapprochement) — sous dmy,
+ * `CONVERT(datetime,'2026-07-31')` lit jour=07/mois=31 → out-of-range, et la
+ * requête renvoie vide. En us_english (mdy, défaut), l'ISO `YYYY-MM-DD` se lit
+ * correctement (année, puis mois, puis jour). Les valeurs de date de l'appli
+ * sont d'ailleurs envoyées en objets `Date` (typés datetime), insensibles au format.
  */
 const DMY = 'SET DATEFORMAT dmy;\n';
 
@@ -106,7 +111,7 @@ export async function query<T = Record<string, unknown>>(
   for (const [name, value] of Object.entries(params)) {
     request.input(name, value);
   }
-  const result = await request.query<T>(DMY + sql);
+  const result = await request.query<T>(sql);
   return result.recordset;
 }
 
