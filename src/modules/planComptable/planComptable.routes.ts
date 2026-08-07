@@ -66,18 +66,31 @@ planComptableRouter.get(
   asyncHandler(async (req, res) => {
     const { idClient } = idClientQuery.parse(req.query);
     const { q } = z.object({ q: z.string().optional() }).parse(req.query);
+    // Recherche multi-mots : chaque mot doit figurer dans le n° de compte OU le
+    // libellé (« contient », pas seulement le début). Ex. « bmw » ne garde que BMW ;
+    // « sarl bardier » trouve le bon tiers quel que soit l'ordre des mots.
+    const termes = (q ?? '').trim().split(/\s+/).filter(Boolean).slice(0, 6);
+    const params: Record<string, unknown> = { idClient };
+    const conds = termes
+      .map((t, i) => {
+        params[`t${i}`] = t;
+        return `(compte LIKE @t${i} + '%' OR libelle LIKE '%' + @t${i} + '%')`;
+      })
+      .join(' AND ');
+    const filtre = termes.length ? `AND ${conds}` : '';
+    // DISTINCT : la vue prismaCompta_planComptable peut renvoyer des doublons.
     const rows = await query(
-      `SELECT TOP 50
-              compte           AS compte,
-              libelle          AS libelle,
-              displayMember    AS displayMember,
-              idCentralisateur AS idCentralisateur,
-              isAnalytique     AS isAnalytique
+      `SELECT DISTINCT TOP 50
+              LTRIM(RTRIM(compte))  AS compte,
+              LTRIM(RTRIM(libelle)) AS libelle,
+              displayMember         AS displayMember,
+              idCentralisateur      AS idCentralisateur,
+              isAnalytique          AS isAnalytique
          FROM prismaCompta_planComptable
         WHERE (idClient = @idClient OR idClient IS NULL)
-          AND (@q IS NULL OR compte LIKE @q + '%' OR libelle LIKE '%' + @q + '%')
+          ${filtre}
         ORDER BY compte`,
-      { idClient, q: q ?? null }
+      params
     );
     res.json(rows);
   })
