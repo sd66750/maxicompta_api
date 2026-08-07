@@ -145,7 +145,8 @@ export async function saveEcriture(input: EcritureInput): Promise<{ id: number; 
   if (typeJournal !== 'AN' && typeJournal !== 'IMP') {
     const intrus = lignes.find((l) => {
       const c = l.comptePCClient.trim();
-      return c !== compteBanque && c.startsWith('5');
+      // 58 = virements internes (transferts entre banques) : exempté du blocage classe 5.
+      return c !== compteBanque && c.startsWith('5') && !c.startsWith('58');
     });
     if (intrus) {
       throw new HttpError(
