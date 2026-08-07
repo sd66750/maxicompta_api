@@ -35,10 +35,10 @@ immosRouter.get(
 /**
  * GET /api/immos/amortissements?dateButoir=YYYY-MM-DD
  * Matrice des amortissements : par immo, dotation annuelle par année.
- * Source = table `..._reprise` (montants RÉELLEMENT comptabilisés par PrismaSoft,
- * base jours réels/365) pour les années passées ; calcul linéaire pour les années
- * futures (au-delà de la dernière reprise), avec prorata de l'année butoir
- * (jours réels/365). Total ligne = cumul d'amortissement à la date butoir.
+ * Calcul linéaire **base jours réels / 365** pour TOUTES les années (passées ET
+ * futures) : dotation = (valeur × taux) × (jours en service dans l'année / 365),
+ * avec prorata de la 1re année (depuis la mise en service) et de l'année butoir,
+ * cumul plafonné à la valeur d'achat. Total ligne = cumul d'amortissement à la butée.
  */
 immosRouter.get(
   '/amortissements',
@@ -47,7 +47,6 @@ immosRouter.get(
     const { dateButoir } = z.object({ dateButoir: z.string().optional() }).parse(req.query);
     const butoir = dateButoir ? new Date(dateButoir) : new Date();
     const butoirYear = butoir.getUTCFullYear();
-    const estFinAnnee = butoir.getUTCMonth() === 11 && butoir.getUTCDate() === 31;
     const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
     const jour = (d: Date) => Math.floor(d.getTime() / 86400000);
 
@@ -59,55 +58,32 @@ immosRouter.get(
         WHERE ISNULL(isSupprimeImmo, 0) = 0 AND ISNULL(isActive, 1) = 1
         ORDER BY TRY_CAST(code AS INT), code`
     );
-    const reprises = await query<{ idImmobilisation: number; annee: number; cumul: number }>(
-      `SELECT idImmobilisation, YEAR(dateReprise) AS annee, valeurReprise AS cumul
-         FROM PrismaCompta_Immo_Immobilisation_reprise ORDER BY idImmobilisation, dateReprise`
-    );
-    const repriseMap = new Map<number, { annee: number; cumul: number }[]>();
-    for (const r of reprises) {
-      const arr = repriseMap.get(r.idImmobilisation) ?? [];
-      arr.push({ annee: r.annee, cumul: Number(r.cumul) });
-      repriseMap.set(r.idImmobilisation, arr);
-    }
 
     const anneesSet = new Set<number>();
     const lignes = immos.map((im) => {
       const base = Number(im.valeurAchat) || 0;
       const tauxFr = im.taux ? Number(im.taux) / 100 : im.duree ? 1 / Number(im.duree) : 0;
       const annuite = base * tauxFr;
-      const rep = (repriseMap.get(im.id) ?? []).filter((r) => r.annee <= butoirYear).sort((a, b) => a.annee - b.annee);
+      const daily = annuite / 365; // base 365 : dotation au jour réel / 365, années passées ET futures
       const dotations: Record<number, number> = {};
       let cumul = 0;
-      let lastYear: number | null = null;
-      for (const r of rep) {
-        const dot = round2(r.cumul - cumul);
-        dotations[r.annee] = dot;
-        anneesSet.add(r.annee);
-        cumul = r.cumul;
-        lastYear = r.annee;
-      }
-      // Années futures (au-delà de la reprise) jusqu'au butoir.
-      const mesYear = im.mes ? Number(im.mes.slice(0, 4)) : butoirYear;
-      let y = lastYear !== null ? lastYear + 1 : mesYear;
-      while (y <= butoirYear && cumul < base - 0.005 && annuite > 0) {
-        let dot: number;
-        const debutAnnee = lastYear === null && y === mesYear && im.mes ? new Date(im.mes) : new Date(Date.UTC(y, 0, 1));
-        if (y === butoirYear && !estFinAnnee) {
-          const jours = Math.max(0, jour(butoir) - jour(debutAnnee) + 1);
-          dot = annuite * (jours / 365);
-        } else if (lastYear === null && y === mesYear && im.mes) {
-          const jours = jour(new Date(Date.UTC(y, 11, 31))) - jour(new Date(im.mes)) + 1;
-          dot = annuite * (jours / 365);
-        } else {
-          dot = annuite;
+      const mes = im.mes ? new Date(im.mes) : null;
+      if (mes && base > 0 && annuite > 0) {
+        const mesYear = mes.getUTCFullYear();
+        for (let y = mesYear; y <= butoirYear && cumul < base - 0.005; y++) {
+          const debut = y === mesYear ? mes : new Date(Date.UTC(y, 0, 1)); // 1re année : depuis la mise en service
+          const finAnnee = new Date(Date.UTC(y, 11, 31));
+          const fin = y === butoirYear && jour(butoir) < jour(finAnnee) ? butoir : finAnnee; // année butoir : jusqu'à la butée
+          if (jour(fin) < jour(debut)) continue;
+          const jours = jour(fin) - jour(debut) + 1; // jours réels en service dans l'année (bornes incluses)
+          let dot = round2(daily * jours);
+          if (cumul + dot > base) dot = round2(base - cumul); // plafond : cumul ne dépasse pas la valeur d'achat
+          if (dot > 0) {
+            dotations[y] = dot;
+            anneesSet.add(y);
+            cumul = round2(cumul + dot);
+          }
         }
-        dot = round2(Math.min(dot, base - cumul));
-        if (dot > 0) {
-          dotations[y] = dot;
-          anneesSet.add(y);
-          cumul = round2(cumul + dot);
-        }
-        y++;
       }
       return { id: im.id, code: im.code, libelle: (im.libelle || '').trim(), valeurAchat: base, dotations, cumul: round2(cumul), vnc: round2(base - cumul) };
     });
