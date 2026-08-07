@@ -78,17 +78,24 @@ planComptableRouter.get(
       })
       .join(' AND ');
     const filtre = termes.length ? `AND ${conds}` : '';
-    // DISTINCT : la vue prismaCompta_planComptable peut renvoyer des doublons.
+    // Dédoublonnage sur (compte, libellé) : la vue peut renvoyer le même compte
+    // plusieurs fois (ex. un tiers rattaché à plusieurs centralisateurs → même
+    // compte/libellé mais idCentralisateur différent).
     const rows = await query(
-      `SELECT DISTINCT TOP 50
-              LTRIM(RTRIM(compte))  AS compte,
-              LTRIM(RTRIM(libelle)) AS libelle,
-              displayMember         AS displayMember,
-              idCentralisateur      AS idCentralisateur,
-              isAnalytique          AS isAnalytique
-         FROM prismaCompta_planComptable
-        WHERE (idClient = @idClient OR idClient IS NULL)
-          ${filtre}
+      `SELECT TOP 50 compte, libelle,
+              MIN(displayMember)                 AS displayMember,
+              MIN(idCentralisateur)              AS idCentralisateur,
+              MAX(CAST(isAnalytique AS tinyint)) AS isAnalytique
+         FROM (
+           SELECT LTRIM(RTRIM(compte))        AS compte,
+                  LTRIM(RTRIM(libelle))       AS libelle,
+                  LTRIM(RTRIM(displayMember)) AS displayMember,
+                  idCentralisateur, isAnalytique
+             FROM prismaCompta_planComptable
+            WHERE (idClient = @idClient OR idClient IS NULL)
+              ${filtre}
+         ) x
+        GROUP BY compte, libelle
         ORDER BY compte`,
       params
     );
