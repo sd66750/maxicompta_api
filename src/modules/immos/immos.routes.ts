@@ -19,7 +19,8 @@ const SELECT_LIST = `
          i.typeImmobilisation, i.numPieceComptable, i.commentaire, i.isActive
     FROM PrismaCompta_Immo_Immobilisation i
     LEFT JOIN PrismaCompta_Immo_FamilleImmobilisation f ON f.id = i.idFamilleImmobilisations
-   WHERE ISNULL(i.isSupprimeImmo, 0) = 0`;
+   WHERE ISNULL(i.isSupprimeImmo, 0) = 0
+     AND ISNULL(i.isActive, 1) = 1`;
 
 /** GET /api/immos — liste des immobilisations (hors supprimées). */
 immosRouter.get(
