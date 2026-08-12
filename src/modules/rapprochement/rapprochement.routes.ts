@@ -63,14 +63,27 @@ rapprochementRouter.get(
       })
       .parse(req.query);
 
-    // Comme le legacy (RapprochementBancaire.cs) : on prend l'ensemble des
-    // écritures du compte de banque sur TOUS les exercices, HORS journal des
-    // à-nouveau (typeJournal 'AN') — donc pas de report à-nouveau — jusqu'à la
-    // date d'arrêté. Une ligne est « pointée » si rapprochée dans PrismaSoft
+    // Comme le legacy (RapprochementBancaire.cs) : le solde du journal = l'ensemble
+    // des écritures du compte sur TOUS les exercices, en EXCLUANT les à-nouveau
+    // annuels (report qui double-compterait) mais en CONSERVANT l'à-nouveau
+    // d'OUVERTURE (celui du 1er exercice = solde de départ réel), jusqu'à la date
+    // d'arrêté. L'à-nouveau d'ouverture est considéré comme déjà pointé (position
+    // de départ rapprochée). Une ligne est « pointée » si rapprochée dans PrismaSoft
     // (prisma_compta_releveBanqueLigne_ligne, lecture seule) OU dans la table web ;
-    // la date de pointage vient du web sinon du legacy (dateRapprochementPointage).
+    // la date de pointage vient du web, sinon du legacy (dateRapprochementPointage).
     const rows = await query(
-      `SELECT l.id                                              AS idLigne,
+      `WITH ligne AS (
+          SELECT l.id, l.idEcriture, l.dateEcritureLigne, l.codeJournalLigne,
+                 l.pieceLigne, l.libelle, l.sens, l.montant, l.idClientLigne,
+                 CASE WHEN EXISTS (SELECT 1 FROM prismaCompta_journal j
+                                    WHERE LTRIM(RTRIM(j.code)) = LTRIM(RTRIM(l.codeJournalLigne))
+                                      AND j.idClient = l.idClientLigne AND j.typeJournal = 'AN')
+                      THEN 1 ELSE 0 END AS isAN
+            FROM prismaCompta_ecritureLigne l
+           WHERE LTRIM(RTRIM(l.comptePCClient)) = @compte
+       ),
+       minan AS (SELECT MIN(idClientLigne) AS minAnExo FROM ligne WHERE isAN = 1)
+       SELECT l.id                                              AS idLigne,
               l.idEcriture                                      AS idEcriture,
               l.dateEcritureLigne                               AS dateEcriture,
               l.codeJournalLigne                                AS codeJournal,
@@ -78,24 +91,27 @@ rapprochementRouter.get(
               l.libelle                                         AS libelle,
               CASE WHEN l.sens = -1 THEN l.montant END          AS debit,
               CASE WHEN l.sens =  1 THEN l.montant END          AS credit,
-              CASE WHEN r.idEcritureLigne IS NULL AND g.idEcritureLigne IS NULL THEN 0 ELSE 1 END AS pointe,
-              CASE WHEN g.idEcritureLigne IS NULL THEN 0 ELSE 1 END AS legacy,
-              COALESCE(r.datePointage, g.dateRappro)            AS datePointage
-         FROM prismaCompta_ecritureLigne l
+              CASE WHEN (l.isAN = 1 AND l.idClientLigne = m.minAnExo)
+                        OR r.idEcritureLigne IS NOT NULL OR g.idEcritureLigne IS NOT NULL
+                   THEN 1 ELSE 0 END                            AS pointe,
+              CASE WHEN g.idEcritureLigne IS NOT NULL
+                        OR (l.isAN = 1 AND l.idClientLigne = m.minAnExo)
+                   THEN 1 ELSE 0 END                            AS legacy,
+              COALESCE(r.datePointage, g.dateRappro,
+                       CASE WHEN l.isAN = 1 AND l.idClientLigne = m.minAnExo
+                            THEN l.dateEcritureLigne END)       AS datePointage
+         FROM ligne l
+         CROSS JOIN minan m
          LEFT JOIN prismaCompta_web_rapprochement r ON r.idEcritureLigne = l.id
          LEFT JOIN (SELECT idEcritureLigne, MAX(dateRapprochementPointage) AS dateRappro
                       FROM prisma_compta_releveBanqueLigne_ligne GROUP BY idEcritureLigne) g
                 ON g.idEcritureLigne = l.id
-        WHERE LTRIM(RTRIM(l.comptePCClient)) = @compte
-          AND NOT EXISTS (
-                SELECT 1 FROM prismaCompta_journal j
-                 WHERE LTRIM(RTRIM(j.code)) = LTRIM(RTRIM(l.codeJournalLigne))
-                   AND j.idClient = l.idClientLigne AND j.typeJournal = 'AN')
+        WHERE (l.isAN = 0 OR l.idClientLigne = m.minAnExo)
           ${dateAu ? 'AND l.dateEcritureLigne < DATEADD(day, 1, @dateAu)' : ''}
           ${mode === 'nonpointe'
-            ? 'AND r.idEcritureLigne IS NULL AND g.idEcritureLigne IS NULL'
+            ? 'AND NOT (l.isAN = 1 AND l.idClientLigne = m.minAnExo) AND r.idEcritureLigne IS NULL AND g.idEcritureLigne IS NULL'
             : mode === 'pointe'
-              ? 'AND (r.idEcritureLigne IS NOT NULL OR g.idEcritureLigne IS NOT NULL)'
+              ? 'AND ((l.isAN = 1 AND l.idClientLigne = m.minAnExo) OR r.idEcritureLigne IS NOT NULL OR g.idEcritureLigne IS NOT NULL)'
               : ''}
         ORDER BY l.dateEcritureLigne, l.id`,
       { compte, dateAu: dateAu ?? null }
@@ -119,20 +135,30 @@ rapprochementRouter.get(
       .object({ idClient: z.coerce.number().int(), compte: z.string().min(1), dateAu: z.string().optional() })
       .parse(req.query);
     const rows = await query<{ soldeComptable: number | null; soldePointe: number | null; nb: number; nbPointes: number | null }>(
-      `SELECT
+      `WITH ligne AS (
+          SELECT l.id, l.dateEcritureLigne, l.sens, l.montant, l.idClientLigne,
+                 CASE WHEN EXISTS (SELECT 1 FROM prismaCompta_journal j
+                                    WHERE LTRIM(RTRIM(j.code)) = LTRIM(RTRIM(l.codeJournalLigne))
+                                      AND j.idClient = l.idClientLigne AND j.typeJournal = 'AN')
+                      THEN 1 ELSE 0 END AS isAN
+            FROM prismaCompta_ecritureLigne l
+           WHERE LTRIM(RTRIM(l.comptePCClient)) = @compte
+       ),
+       minan AS (SELECT MIN(idClientLigne) AS minAnExo FROM ligne WHERE isAN = 1)
+       SELECT
           SUM(CASE WHEN l.sens = -1 THEN l.montant ELSE -l.montant END) AS soldeComptable,
-          SUM(CASE WHEN (r.idEcritureLigne IS NOT NULL OR g.idEcritureLigne IS NOT NULL)
+          SUM(CASE WHEN (l.isAN = 1 AND l.idClientLigne = m.minAnExo)
+                        OR r.idEcritureLigne IS NOT NULL OR g.idEcritureLigne IS NOT NULL
                    THEN CASE WHEN l.sens = -1 THEN l.montant ELSE -l.montant END ELSE 0 END) AS soldePointe,
           COUNT(*) AS nb,
-          SUM(CASE WHEN (r.idEcritureLigne IS NOT NULL OR g.idEcritureLigne IS NOT NULL) THEN 1 ELSE 0 END) AS nbPointes
-         FROM prismaCompta_ecritureLigne l
+          SUM(CASE WHEN (l.isAN = 1 AND l.idClientLigne = m.minAnExo)
+                        OR r.idEcritureLigne IS NOT NULL OR g.idEcritureLigne IS NOT NULL
+                   THEN 1 ELSE 0 END) AS nbPointes
+         FROM ligne l
+         CROSS JOIN minan m
          LEFT JOIN prismaCompta_web_rapprochement r ON r.idEcritureLigne = l.id
          LEFT JOIN (SELECT DISTINCT idEcritureLigne FROM prisma_compta_releveBanqueLigne_ligne) g ON g.idEcritureLigne = l.id
-        WHERE LTRIM(RTRIM(l.comptePCClient)) = @compte
-          AND NOT EXISTS (
-                SELECT 1 FROM prismaCompta_journal j
-                 WHERE LTRIM(RTRIM(j.code)) = LTRIM(RTRIM(l.codeJournalLigne))
-                   AND j.idClient = l.idClientLigne AND j.typeJournal = 'AN')
+        WHERE (l.isAN = 0 OR l.idClientLigne = m.minAnExo)
           ${dateAu ? 'AND l.dateEcritureLigne < DATEADD(day, 1, @dateAu)' : ''}`,
       { compte, dateAu: dateAu ?? null }
     );
