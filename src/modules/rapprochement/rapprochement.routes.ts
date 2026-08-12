@@ -53,18 +53,22 @@ rapprochementRouter.get(
   requireAuth,
   asyncHandler(async (req, res) => {
     await ensureTable();
-    const { idClient, compte, dateDu, dateAu } = z
+    const { compte, dateAu, mode } = z
       .object({
         idClient: z.coerce.number().int(),
         compte: z.string().min(1),
         dateDu: z.string().optional(),
         dateAu: z.string().optional(),
+        mode: z.enum(['nonpointe', 'pointe', 'toutes']).optional(),
       })
       .parse(req.query);
 
-    // Une ligne est « pointée » si elle est rapprochée dans PrismaSoft
-    // (prisma_compta_releveBanqueLigne_ligne, en lecture seule) OU dans la table
-    // web. `legacy` distingue les pointages historiques (non modifiables ici).
+    // Comme le legacy (RapprochementBancaire.cs) : on prend l'ensemble des
+    // écritures du compte de banque sur TOUS les exercices, HORS journal des
+    // à-nouveau (typeJournal 'AN') — donc pas de report à-nouveau — jusqu'à la
+    // date d'arrêté. Une ligne est « pointée » si rapprochée dans PrismaSoft
+    // (prisma_compta_releveBanqueLigne_ligne, lecture seule) OU dans la table web ;
+    // la date de pointage vient du web sinon du legacy (dateRapprochementPointage).
     const rows = await query(
       `SELECT l.id                                              AS idLigne,
               l.idEcriture                                      AS idEcriture,
@@ -76,19 +80,69 @@ rapprochementRouter.get(
               CASE WHEN l.sens =  1 THEN l.montant END          AS credit,
               CASE WHEN r.idEcritureLigne IS NULL AND g.idEcritureLigne IS NULL THEN 0 ELSE 1 END AS pointe,
               CASE WHEN g.idEcritureLigne IS NULL THEN 0 ELSE 1 END AS legacy,
-              r.datePointage                                    AS datePointage
+              COALESCE(r.datePointage, g.dateRappro)            AS datePointage
          FROM prismaCompta_ecritureLigne l
          LEFT JOIN prismaCompta_web_rapprochement r ON r.idEcritureLigne = l.id
-         LEFT JOIN (SELECT DISTINCT idEcritureLigne FROM prisma_compta_releveBanqueLigne_ligne) g
+         LEFT JOIN (SELECT idEcritureLigne, MAX(dateRapprochementPointage) AS dateRappro
+                      FROM prisma_compta_releveBanqueLigne_ligne GROUP BY idEcritureLigne) g
                 ON g.idEcritureLigne = l.id
-        WHERE l.idClientLigne = @idClient
-          AND LTRIM(RTRIM(l.comptePCClient)) = @compte
-          ${dateDu ? 'AND l.dateEcritureLigne >= @dateDu' : ''}
+        WHERE LTRIM(RTRIM(l.comptePCClient)) = @compte
+          AND NOT EXISTS (
+                SELECT 1 FROM prismaCompta_journal j
+                 WHERE LTRIM(RTRIM(j.code)) = LTRIM(RTRIM(l.codeJournalLigne))
+                   AND j.idClient = l.idClientLigne AND j.typeJournal = 'AN')
           ${dateAu ? 'AND l.dateEcritureLigne < DATEADD(day, 1, @dateAu)' : ''}
+          ${mode === 'nonpointe'
+            ? 'AND r.idEcritureLigne IS NULL AND g.idEcritureLigne IS NULL'
+            : mode === 'pointe'
+              ? 'AND (r.idEcritureLigne IS NOT NULL OR g.idEcritureLigne IS NOT NULL)'
+              : ''}
         ORDER BY l.dateEcritureLigne, l.id`,
-      { idClient, compte, dateDu: dateDu ?? null, dateAu: dateAu ?? null }
+      { compte, dateAu: dateAu ?? null }
     );
     res.json(rows);
+  })
+);
+
+/**
+ * GET /api/rapprochement/totaux?idClient=&compte=&dateAu=
+ * État de rapprochement calculé sur TOUTES les lignes du compte (tous exercices,
+ * hors AN, jusqu'à la date d'arrêté) — indépendant du filtre d'affichage, pour
+ * que les totaux restent justes même si on ne charge qu'une partie des lignes.
+ */
+rapprochementRouter.get(
+  '/totaux',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    await ensureTable();
+    const { compte, dateAu } = z
+      .object({ idClient: z.coerce.number().int(), compte: z.string().min(1), dateAu: z.string().optional() })
+      .parse(req.query);
+    const rows = await query<{ soldeComptable: number | null; soldePointe: number | null; nb: number; nbPointes: number | null }>(
+      `SELECT
+          SUM(CASE WHEN l.sens = -1 THEN l.montant ELSE -l.montant END) AS soldeComptable,
+          SUM(CASE WHEN (r.idEcritureLigne IS NOT NULL OR g.idEcritureLigne IS NOT NULL)
+                   THEN CASE WHEN l.sens = -1 THEN l.montant ELSE -l.montant END ELSE 0 END) AS soldePointe,
+          COUNT(*) AS nb,
+          SUM(CASE WHEN (r.idEcritureLigne IS NOT NULL OR g.idEcritureLigne IS NOT NULL) THEN 1 ELSE 0 END) AS nbPointes
+         FROM prismaCompta_ecritureLigne l
+         LEFT JOIN prismaCompta_web_rapprochement r ON r.idEcritureLigne = l.id
+         LEFT JOIN (SELECT DISTINCT idEcritureLigne FROM prisma_compta_releveBanqueLigne_ligne) g ON g.idEcritureLigne = l.id
+        WHERE LTRIM(RTRIM(l.comptePCClient)) = @compte
+          AND NOT EXISTS (
+                SELECT 1 FROM prismaCompta_journal j
+                 WHERE LTRIM(RTRIM(j.code)) = LTRIM(RTRIM(l.codeJournalLigne))
+                   AND j.idClient = l.idClientLigne AND j.typeJournal = 'AN')
+          ${dateAu ? 'AND l.dateEcritureLigne < DATEADD(day, 1, @dateAu)' : ''}`,
+      { compte, dateAu: dateAu ?? null }
+    );
+    const r = rows[0];
+    res.json({
+      soldeComptable: r?.soldeComptable ?? 0,
+      soldePointe: r?.soldePointe ?? 0,
+      nb: r?.nb ?? 0,
+      nbPointes: r?.nbPointes ?? 0,
+    });
   })
 );
 
@@ -115,6 +169,57 @@ rapprochementRouter.post(
     } else {
       await query(`DELETE FROM prismaCompta_web_rapprochement WHERE idEcritureLigne IN (${ids})`, {});
     }
+    res.json({ ok: true });
+  })
+);
+
+/**
+ * Solde du relevé mémorisé par le legacy dans prisma_compta_releveBanque
+ * (une ligne par journal + date d'arrêté : montant absolu + sens ; sens = 1 pour
+ * un solde positif, -1 pour négatif ; saisie manuelle = idImport NULL).
+ * GET /api/rapprochement/solde?idClient=&codeJournal=&dateAu=
+ */
+rapprochementRouter.get(
+  '/solde',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const { codeJournal, dateAu } = z
+      .object({ idClient: z.coerce.number().int(), codeJournal: z.string().min(1), dateAu: z.string().min(1) })
+      .parse(req.query);
+    const rows = await query<{ montant: number; sens: number }>(
+      `SELECT TOP 1 montant, sens
+         FROM prisma_compta_releveBanque
+        WHERE LTRIM(RTRIM(codeJournal)) = @codeJournal AND CAST(date AS date) = CONVERT(date, @dateAu, 23)
+        ORDER BY id DESC`,
+      { codeJournal, dateAu }
+    );
+    const r = rows[0];
+    res.json({ solde: r ? (r.sens === -1 ? -r.montant : r.montant) : null });
+  })
+);
+
+/** POST /api/rapprochement/solde — mémorise le solde du relevé dans le legacy (upsert de l'entrée manuelle du journal à cette date). */
+rapprochementRouter.post(
+  '/solde',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const { codeJournal, dateAu, solde } = z
+      .object({ idClient: z.number().int(), codeJournal: z.string().min(1), dateAu: z.string().min(1), solde: z.number() })
+      .parse(req.body);
+    const montant = Math.abs(solde);
+    const sens = solde < 0 ? -1 : 1;
+    await query(
+      `DECLARE @id INT = (SELECT MAX(id) FROM prisma_compta_releveBanque
+                           WHERE LTRIM(RTRIM(codeJournal)) = @codeJournal
+                             AND CAST(date AS date) = CONVERT(date, @dateAu, 23)
+                             AND idImport IS NULL);
+       IF @id IS NULL
+         INSERT INTO prisma_compta_releveBanque (date, montant, sens, codeJournal, idImport)
+         VALUES (CONVERT(datetime, @dateAu, 23), @montant, @sens, @codeJournal, NULL);
+       ELSE
+         UPDATE prisma_compta_releveBanque SET montant = @montant, sens = @sens WHERE id = @id;`,
+      { codeJournal, dateAu, montant, sens }
+    );
     res.json({ ok: true });
   })
 );
