@@ -75,7 +75,8 @@ rapprochementRouter.get(
               CASE WHEN l.sens = -1 THEN l.montant END          AS debit,
               CASE WHEN l.sens =  1 THEN l.montant END          AS credit,
               CASE WHEN r.idEcritureLigne IS NULL AND g.idEcritureLigne IS NULL THEN 0 ELSE 1 END AS pointe,
-              CASE WHEN g.idEcritureLigne IS NULL THEN 0 ELSE 1 END AS legacy
+              CASE WHEN g.idEcritureLigne IS NULL THEN 0 ELSE 1 END AS legacy,
+              r.datePointage                                    AS datePointage
          FROM prismaCompta_ecritureLigne l
          LEFT JOIN prismaCompta_web_rapprochement r ON r.idEcritureLigne = l.id
          LEFT JOIN (SELECT DISTINCT idEcritureLigne FROM prisma_compta_releveBanqueLigne_ligne) g
