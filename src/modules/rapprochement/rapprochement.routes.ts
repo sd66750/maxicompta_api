@@ -107,7 +107,7 @@ rapprochementRouter.get(
                       FROM prisma_compta_releveBanqueLigne_ligne GROUP BY idEcritureLigne) g
                 ON g.idEcritureLigne = l.id
         WHERE (l.isAN = 0 OR l.idClientLigne = m.minAnExo)
-          ${dateAu ? 'AND l.dateEcritureLigne < DATEADD(day, 1, @dateAu)' : ''}
+          ${dateAu ? 'AND l.dateEcritureLigne < DATEADD(day, 1, CONVERT(date, @dateAu, 23))' : ''}
           ${mode === 'nonpointe'
             ? 'AND NOT (l.isAN = 1 AND l.idClientLigne = m.minAnExo) AND r.idEcritureLigne IS NULL AND g.idEcritureLigne IS NULL'
             : mode === 'pointe'
@@ -159,7 +159,7 @@ rapprochementRouter.get(
          LEFT JOIN prismaCompta_web_rapprochement r ON r.idEcritureLigne = l.id
          LEFT JOIN (SELECT DISTINCT idEcritureLigne FROM prisma_compta_releveBanqueLigne_ligne) g ON g.idEcritureLigne = l.id
         WHERE (l.isAN = 0 OR l.idClientLigne = m.minAnExo)
-          ${dateAu ? 'AND l.dateEcritureLigne < DATEADD(day, 1, @dateAu)' : ''}`,
+          ${dateAu ? 'AND l.dateEcritureLigne < DATEADD(day, 1, CONVERT(date, @dateAu, 23))' : ''}`,
       { compte, dateAu: dateAu ?? null }
     );
     const r = rows[0];
@@ -241,7 +241,7 @@ rapprochementRouter.post(
                              AND idImport IS NULL);
        IF @id IS NULL
          INSERT INTO prisma_compta_releveBanque (date, montant, sens, codeJournal, idImport)
-         VALUES (CONVERT(datetime, @dateAu, 23), @montant, @sens, @codeJournal, NULL);
+         VALUES (CONVERT(date, @dateAu, 23), @montant, @sens, @codeJournal, NULL);
        ELSE
          UPDATE prisma_compta_releveBanque SET montant = @montant, sens = @sens WHERE id = @id;`,
       { codeJournal, dateAu, montant, sens }
