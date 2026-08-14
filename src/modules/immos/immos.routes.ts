@@ -16,11 +16,13 @@ const SELECT_LIST = `
          i.idFamilleImmobilisations, f.libelle AS famille,
          i.dateAchat, i.dateMiseEnService, i.valeurAchat, i.valeurFiscale,
          i.amortissementTypeAmortissement, i.amortissementDuree, i.amortissementTaux,
-         i.typeImmobilisation, i.numPieceComptable, i.commentaire, i.isActive
+         i.typeImmobilisation, i.numPieceComptable, i.commentaire, i.isActive,
+         i.dateSortie, i.typeSortie, i.cessionDate, i.cessionType, i.valeurDeCession,
+         CAST(ISNULL(i.isSortieTotale, 0) AS bit) AS isSortieTotale
     FROM PrismaCompta_Immo_Immobilisation i
     LEFT JOIN PrismaCompta_Immo_FamilleImmobilisation f ON f.id = i.idFamilleImmobilisations
    WHERE ISNULL(i.isSupprimeImmo, 0) = 0
-     AND ISNULL(i.isActive, 1) = 1`;
+     AND (ISNULL(i.isActive, 1) = 1 OR i.dateSortie IS NOT NULL OR ISNULL(i.isSortieTotale, 0) = 1)`;
 
 /** GET /api/immos — liste des immobilisations (hors supprimées). */
 immosRouter.get(
