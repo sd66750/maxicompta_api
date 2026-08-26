@@ -107,6 +107,50 @@ lettrageRouter.get(
   })
 );
 
+/**
+ * GET /api/lettrage/historique?idClient=&compte=
+ * Historique complet d'un compte, en LECTURE SEULE : toutes les écritures de TOUS
+ * les exercices de la société (remontée via idSociete), HORS journal des À Nouveau
+ * (typeJournal='AN'), triées chronologiquement (pour un solde progressif côté client).
+ * Sert la vue « Écritures hors journal des À Nouveau » depuis le Lettrage.
+ */
+lettrageRouter.get(
+  '/historique',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const { idClient } = idClientQuery.parse(req.query);
+    const { compte } = z.object({ compte: z.string().min(1) }).parse(req.query);
+
+    const rows = await query<LigneRow>(
+      `SELECT l.id                 AS idLigne,
+              l.idEcriture         AS id,
+              l.dateEcritureLigne  AS dateEcriture,
+              l.codeJournalLigne   AS codeJournal,
+              l.pieceLigne         AS piece,
+              l.libelle,
+              CASE WHEN l.sens = -1 THEN l.montant END AS debit,
+              CASE WHEN l.sens =  1 THEN l.montant END AS credit,
+              l.lettrage
+         FROM prismaCompta_ecritureLigne l
+         ${JOIN_PLAN}
+        WHERE l.idClientLigne IN (
+                SELECT id FROM prismaCompta_client
+                 WHERE idSociete = (SELECT idSociete FROM prismaCompta_client WHERE id = @idClient)
+              )
+          AND p.displayMember = @compte
+          AND NOT EXISTS (
+                SELECT 1 FROM prismaCompta_journal j
+                 WHERE LTRIM(RTRIM(j.code)) = LTRIM(RTRIM(l.codeJournalLigne))
+                   AND j.idClient = l.idClientLigne
+                   AND j.typeJournal = 'AN'
+              )
+        ORDER BY l.dateEcritureLigne, l.id`,
+      { idClient, compte }
+    );
+    res.json(rows);
+  })
+);
+
 const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 
 /** Récupère les lignes (montant/sens/compte/lettrage) par ids, scindées par l'exercice. */
