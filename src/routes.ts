@@ -15,6 +15,7 @@ import { immosRouter } from './modules/immos/immos.routes.js';
 import { liasseRouter } from './modules/liasse/liasse.routes.js';
 import { clotureExerciceRouter } from './modules/clotureExercice/clotureExercice.routes.js';
 import { analytiqueRouter } from './modules/analytique/analytique.routes.js';
+import { resultatMensuelRouter } from './modules/resultatMensuel/resultatMensuel.routes.js';
 
 export const apiRouter = Router();
 
@@ -36,3 +37,4 @@ apiRouter.use('/immos', immosRouter); // immobilisations
 apiRouter.use('/liasse', liasseRouter); // bilan + compte de résultat
 apiRouter.use('/cloture-exercice', clotureExerciceRouter); // clôture / déclôture d'exercice
 apiRouter.use('/analytique', analytiqueRouter); // sections / natures analytiques
+apiRouter.use('/resultat-mensuel', resultatMensuelRouter); // compte de résultat mensualisé
