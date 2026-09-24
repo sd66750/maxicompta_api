@@ -1,6 +1,6 @@
 import type { NextFunction, Request, Response } from 'express';
 import { ZodError } from 'zod';
-import { ConnectionNotConfiguredError } from '../db/pool.js';
+import { ConnectionNotConfiguredError, UnknownDatabaseError } from '../db/pool.js';
 
 export class HttpError extends Error {
   constructor(public status: number, message: string) {
@@ -27,6 +27,10 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
   }
   if (err instanceof ConnectionNotConfiguredError) {
     res.status(409).json({ error: err.message, code: 'NO_CONNECTION' });
+    return;
+  }
+  if (err instanceof UnknownDatabaseError) {
+    res.status(400).json({ error: err.message });
     return;
   }
   if (err instanceof HttpError) {

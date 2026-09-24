@@ -30,6 +30,14 @@ export class ConnectionNotConfiguredError extends Error {
   }
 }
 
+/** Base société demandée (en-tête X-Societe-Db) inconnue ou non autorisée. */
+export class UnknownDatabaseError extends Error {
+  constructor(database: string) {
+    super(`Société inconnue ou base non autorisée : ${database}`);
+    this.name = 'UnknownDatabaseError';
+  }
+}
+
 /** Ouvre (ou récupère) le pool pour la connexion active. */
 export async function getPool(): Promise<mssql.ConnectionPool> {
   const raw = await getActiveConnectionString();
@@ -87,6 +95,44 @@ export async function listSocietes(): Promise<string[]> {
   return result.recordset.map((r) => r.name);
 }
 
+// Cache court de la liste des bases autorisées (PrismaSoft_%) pour valider le
+// routage par requête sans un aller-retour `master` à chaque appel.
+let allowedCache: { list: Set<string>; at: number } | null = null;
+async function allowedDatabases(): Promise<Set<string>> {
+  if (allowedCache && Date.now() - allowedCache.at < 60_000) return allowedCache.list;
+  const list = new Set(await listSocietes());
+  allowedCache = { list, at: Date.now() };
+  return list;
+}
+
+/**
+ * Ouvre (ou récupère) le pool pour une base société EXPLICITE, validée contre la
+ * liste des bases `PrismaSoft_%`. Sert au routage PAR REQUÊTE (en-tête X-Societe-Db),
+ * indépendant de la société active globale — évite qu'une autre session ne fasse
+ * basculer la base sous les pieds de celle-ci.
+ */
+export async function getPoolForDatabase(database: string): Promise<mssql.ConnectionPool> {
+  const server = await getServerConnectionString();
+  if (!server) throw new ConnectionNotConfiguredError();
+  const allowed = await allowedDatabases();
+  if (!allowed.has(database)) throw new UnknownDatabaseError(database);
+
+  const config = parseSqlConnectionString(withDatabase(server, database));
+  const key = `${config.server}/${config.database ?? ''}`;
+
+  const existing = pools.get(key);
+  if (existing && (existing.connected || existing.connecting)) return existing;
+
+  const pool = new mssql.ConnectionPool(config);
+  pool.on('error', (err) => {
+    console.error('[pool] Erreur de pool mssql :', err.message);
+    pools.delete(key);
+  });
+  await pool.connect();
+  pools.set(key, pool);
+  return pool;
+}
+
 /** Teste une chaîne de connexion arbitraire sans la persister ni la mettre en cache. */
 export async function testConnectionString(raw: string): Promise<{ ok: true; version: string; database?: string }> {
   const config = parseSqlConnectionString(raw);
@@ -107,6 +153,21 @@ export async function query<T = Record<string, unknown>>(
   params: Record<string, unknown> = {}
 ): Promise<T[]> {
   const pool = await getPool();
+  const request = pool.request();
+  for (const [name, value] of Object.entries(params)) {
+    request.input(name, value);
+  }
+  const result = await request.query<T>(sql);
+  return result.recordset;
+}
+
+/** Requête paramétrée sur une base société EXPLICITE (routage par requête). */
+export async function queryOn<T = Record<string, unknown>>(
+  database: string,
+  sql: string,
+  params: Record<string, unknown> = {}
+): Promise<T[]> {
+  const pool = await getPoolForDatabase(database);
   const request = pool.request();
   for (const [name, value] of Object.entries(params)) {
     request.input(name, value);

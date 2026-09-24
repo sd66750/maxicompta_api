@@ -1,15 +1,27 @@
 import { Router } from 'express';
+import type { Request } from 'express';
 import { z } from 'zod';
 import { asyncHandler, HttpError } from '../../http/helpers.js';
 import { requireAuth } from '../../auth/middleware.js';
-import { query } from '../../db/pool.js';
+import { queryOn } from '../../db/pool.js';
 
 export const immosRouter = Router();
 
 /**
- * Immobilisations (PrismaCompta_Immo_Immobilisation). La table est globale à la
- * société (pas d'idClient/idExercice). Suppression = marquage isSupprimeImmo.
+ * Immobilisations (PrismaCompta_Immo_Immobilisation). La table est propre à chaque
+ * base société (pas d'idClient/idExercice) → l'isolation se fait UNIQUEMENT par la
+ * base ciblée. On route donc chaque requête vers la base envoyée par le front
+ * (en-tête X-Societe-Db) plutôt que vers la « société active » globale du serveur,
+ * qui pouvait basculer sous l'effet d'une autre session (fuite inter-sociétés).
+ * Suppression = marquage isSupprimeImmo.
  */
+
+/** Base société cible (en-tête X-Societe-Db). Fail-closed : erreur si absente. */
+function reqDb(req: Request): string {
+  const db = req.header('X-Societe-Db');
+  if (!db) throw new HttpError(400, 'Société non spécifiée (en-tête X-Societe-Db manquant).');
+  return db;
+}
 
 const SELECT_LIST = `
   SELECT i.id, i.code, i.libelle,
@@ -28,8 +40,8 @@ const SELECT_LIST = `
 immosRouter.get(
   '/',
   requireAuth,
-  asyncHandler(async (_req, res) => {
-    const rows = await query(`${SELECT_LIST} ORDER BY TRY_CAST(i.code AS INT), i.code`);
+  asyncHandler(async (req, res) => {
+    const rows = await queryOn(reqDb(req), `${SELECT_LIST} ORDER BY TRY_CAST(i.code AS INT), i.code`);
     res.json(rows);
   })
 );
@@ -47,13 +59,15 @@ immosRouter.get(
   requireAuth,
   asyncHandler(async (req, res) => {
     const { dateButoir } = z.object({ dateButoir: z.string().optional() }).parse(req.query);
+    const db = reqDb(req);
     const butoir = dateButoir ? new Date(dateButoir) : new Date();
     const butoirYear = butoir.getUTCFullYear();
     const estFinAnnee = butoir.getUTCMonth() === 11 && butoir.getUTCDate() === 31;
     const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
     const jour = (d: Date) => Math.floor(d.getTime() / 86400000);
 
-    const immos = await query<{ id: number; code: string; libelle: string; valeurAchat: number; mes: string | null; duree: number | null; taux: number | null; famille: string | null }>(
+    const immos = await queryOn<{ id: number; code: string; libelle: string; valeurAchat: number; mes: string | null; duree: number | null; taux: number | null; famille: string | null }>(
+      db,
       `SELECT i.id, LTRIM(RTRIM(i.code)) AS code, i.libelle, i.valeurAchat,
               CONVERT(varchar, i.dateMiseEnService, 23) AS mes,
               i.amortissementDuree AS duree, i.amortissementTaux AS taux,
@@ -63,7 +77,8 @@ immosRouter.get(
         WHERE ISNULL(i.isSupprimeImmo, 0) = 0 AND ISNULL(i.isActive, 1) = 1
         ORDER BY f.libelle, TRY_CAST(i.code AS INT), i.code`
     );
-    const reprises = await query<{ idImmobilisation: number; annee: number; cumul: number }>(
+    const reprises = await queryOn<{ idImmobilisation: number; annee: number; cumul: number }>(
+      db,
       `SELECT idImmobilisation, YEAR(dateReprise) AS annee, valeurReprise AS cumul
          FROM PrismaCompta_Immo_Immobilisation_reprise ORDER BY idImmobilisation, dateReprise`
     );
@@ -127,8 +142,8 @@ immosRouter.get(
 immosRouter.get(
   '/familles',
   requireAuth,
-  asyncHandler(async (_req, res) => {
-    const rows = await query(`SELECT id, libelle FROM PrismaCompta_Immo_FamilleImmobilisation ORDER BY libelle`);
+  asyncHandler(async (req, res) => {
+    const rows = await queryOn(reqDb(req), `SELECT id, libelle FROM PrismaCompta_Immo_FamilleImmobilisation ORDER BY libelle`);
     res.json(rows);
   })
 );
@@ -176,14 +191,17 @@ immosRouter.post(
   requireAuth,
   asyncHandler(async (req, res) => {
     const b = bodySchema.parse(req.body);
+    const db = reqDb(req);
     let code = b.code?.trim();
     if (!code) {
-      const r = await query<{ next: number }>(
+      const r = await queryOn<{ next: number }>(
+        db,
         `SELECT ISNULL(MAX(TRY_CAST(code AS INT)), 0) + 1 AS next FROM PrismaCompta_Immo_Immobilisation`
       );
       code = String(r[0]?.next ?? 1);
     }
-    const rows = await query<{ id: number }>(
+    const rows = await queryOn<{ id: number }>(
+      db,
       `INSERT INTO PrismaCompta_Immo_Immobilisation
          (code, libelle, idFamilleImmobilisations, dateAchat, dateMiseEnService, valeurAchat, valeurFiscale,
           amortissementTypeAmortissement, amortissementDuree, amortissementTaux, typeImmobilisation,
@@ -204,12 +222,15 @@ immosRouter.put(
   asyncHandler(async (req, res) => {
     const id = z.coerce.number().int().parse(req.params.id);
     const b = bodySchema.parse(req.body);
-    const exist = await query<{ id: number }>(
+    const db = reqDb(req);
+    const exist = await queryOn<{ id: number }>(
+      db,
       `SELECT id FROM PrismaCompta_Immo_Immobilisation WHERE id = @id AND ISNULL(isSupprimeImmo,0) = 0`,
       { id }
     );
     if (!exist[0]) throw new HttpError(404, 'Immobilisation introuvable.');
-    await query(
+    await queryOn(
+      db,
       `UPDATE PrismaCompta_Immo_Immobilisation SET
          libelle = @libelle, idFamilleImmobilisations = @idFamille,
          dateAchat = @dateAchat, dateMiseEnService = @dateMiseEnService,
@@ -229,7 +250,7 @@ immosRouter.delete(
   requireAuth,
   asyncHandler(async (req, res) => {
     const id = z.coerce.number().int().parse(req.params.id);
-    await query(`UPDATE PrismaCompta_Immo_Immobilisation SET isSupprimeImmo = 1 WHERE id = @id`, { id });
+    await queryOn(reqDb(req), `UPDATE PrismaCompta_Immo_Immobilisation SET isSupprimeImmo = 1 WHERE id = @id`, { id });
     res.json({ ok: true });
   })
 );
