@@ -127,28 +127,39 @@ ecrituresRouter.get(
   requireAuth,
   asyncHandler(async (req, res) => {
     const { idClient } = idClientQuery.parse(req.query);
-    const { journal, idPeriode } = z
-      .object({ journal: z.string().optional(), idPeriode: z.coerce.number().int().optional() })
+    const { journal, idPeriode, montant } = z
+      .object({
+        journal: z.string().optional(),
+        idPeriode: z.coerce.number().int().optional(),
+        // Recherche par montant : toutes les écritures DE L'EXERCICE (tous journaux,
+        // toutes périodes) ayant au moins une ligne de ce montant, débit ou crédit.
+        montant: z.coerce.number().positive().optional(),
+      })
       .parse(req.query);
 
     const rows = await query(
-      `SELECT e.id AS idEcriture, e.jour, e.piece, e.codeJournal, e.idPeriode, e.dateEcheance,
+      `SELECT TOP 5000
+              e.id AS idEcriture, e.jour, e.piece, e.codeJournal, e.idPeriode, e.dateEcheance,
               p.periode AS moisPeriode,
               l.id AS idLigne, l.positionEcritureLigne,
               LTRIM(RTRIM(l.comptePCClient)) AS compte,
               LTRIM(RTRIM(pcg.libelle)) AS libelleCompte,
               l.libelle, l.montant, l.sens, l.lettrage,
               CASE WHEN l.sens = -1 THEN l.montant ELSE 0 END AS debit,
-              CASE WHEN l.sens =  1 THEN l.montant ELSE 0 END AS credit
+              CASE WHEN l.sens =  1 THEN l.montant ELSE 0 END AS credit,
+              CAST(CASE WHEN @montant IS NOT NULL AND ABS(l.montant - @montant) < 0.005 THEN 1 ELSE 0 END AS bit) AS correspond
          FROM prismaCompta_ecriture e
          LEFT JOIN prismaCompta_periode p ON p.id = e.idPeriode
          JOIN prismaCompta_ecritureLigne l ON l.idEcriture = e.id
          LEFT JOIN prismaCompta_PCG pcg ON pcg.compte = l.comptePCClient AND pcg.idClient = e.idClient
         WHERE e.idClient = @idClient
-          AND (@journal IS NULL OR e.codeJournal = @journal)
-          AND (@idPeriode IS NULL OR e.idPeriode = @idPeriode)
+          AND (@montant IS NOT NULL OR @journal IS NULL OR e.codeJournal = @journal)
+          AND (@montant IS NOT NULL OR @idPeriode IS NULL OR e.idPeriode = @idPeriode)
+          AND (@montant IS NULL OR EXISTS (
+                SELECT 1 FROM prismaCompta_ecritureLigne m
+                 WHERE m.idEcriture = e.id AND ABS(m.montant - @montant) < 0.005))
         ORDER BY p.periode, TRY_CAST(e.jour AS INT), e.id, l.positionEcritureLigne, l.id`,
-      { idClient, journal: journal ?? null, idPeriode: idPeriode ?? null }
+      { idClient, journal: journal ?? null, idPeriode: idPeriode ?? null, montant: montant ?? null }
     );
     res.json(rows);
   })
