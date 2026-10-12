@@ -213,12 +213,30 @@ export async function saveEcriture(input: EcritureInput): Promise<{ id: number; 
     }
 
     // Insertion des lignes (table physique prismaCompta_ecritureLigne)
+    //
+    // idTiersCentralisateur : comme le logiciel d'origine, une ligne sur un compte de
+    // tiers porte le centralisateur de ce tiers (411 / 401 / 404…). Sans lui, les états
+    // et le lettrage retombent sur la règle par défaut (411% -> 1, 401% -> 2) : un tiers
+    // rattaché à un autre centralisateur (ex. fournisseur d'immobilisations 404, compte
+    // en 401…) ne trouvait plus son compte et sa ligne disparaissait de la balance.
+    // On privilégie le centralisateur par défaut quand le tiers y est rattaché, sinon
+    // le sien ; compte général = NULL (comme le legacy).
     for (const l of lignes) {
       await q(
         `INSERT INTO prismaCompta_ecritureLigne
            (libelle, montant, sens, lettrage, idEcriture, comptePCClient, importation, isLigneCloture,
-            idSectionAnalytiqueLigne, idNatureAnalytiqueLigne)
-         VALUES (@libelle, @montant, @sens, @lettrage, @idEcriture, @compte, 0, 0, @idSection, @idNature)`,
+            idSectionAnalytiqueLigne, idNatureAnalytiqueLigne, idTiersCentralisateur)
+         VALUES (@libelle, @montant, @sens, @lettrage, @idEcriture, @compte, 0, 0, @idSection, @idNature,
+           (SELECT TOP 1 p.idCentralisateur
+              FROM prismaCompta_planComptable p
+             WHERE p.compte = @compte
+               AND p.idTiersGestion IS NOT NULL
+               AND p.idCentralisateur <> 0
+               AND (p.idClient = @idClient OR p.idClient IS NULL)
+             ORDER BY CASE WHEN p.idCentralisateur =
+                             CASE WHEN @compte LIKE '411%' THEN 1 WHEN @compte LIKE '401%' THEN 2 ELSE 0 END
+                           THEN 0 ELSE 1 END,
+                      p.idCentralisateur))`,
         {
           libelle: l.libelle,
           montant: l.montant,
@@ -228,6 +246,7 @@ export async function saveEcriture(input: EcritureInput): Promise<{ id: number; 
           compte: l.comptePCClient,
           idSection: l.idSection,
           idNature: l.idNature,
+          idClient: input.idClient,
         }
       );
     }
