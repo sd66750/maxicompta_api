@@ -16,6 +16,7 @@ import { liasseRouter } from './modules/liasse/liasse.routes.js';
 import { clotureExerciceRouter } from './modules/clotureExercice/clotureExercice.routes.js';
 import { analytiqueRouter } from './modules/analytique/analytique.routes.js';
 import { resultatMensuelRouter } from './modules/resultatMensuel/resultatMensuel.routes.js';
+import { tiersRouter } from './modules/tiers/tiers.routes.js';
 
 export const apiRouter = Router();
 
@@ -26,6 +27,7 @@ apiRouter.use('/auth', authRouter);
 apiRouter.use('/', exercicesRouter); // /societes, /exercices
 apiRouter.use('/journaux', journauxRouter);
 apiRouter.use('/comptes', planComptableRouter);
+apiRouter.use('/tiers', tiersRouter); // tiers 401/404/411 (gestion commerciale désolidarisée)
 apiRouter.use('/ecritures', ecrituresRouter); // liste, /:id, /periodes, /save, /autorisation/check
 apiRouter.use('/etats', etatsRouter); // /balance, /grand-livre/detail
 apiRouter.use('/lettrage', lettrageRouter); // /comptes, /lignes, /lettrer, /delettrer, /auto

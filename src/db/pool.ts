@@ -206,4 +206,28 @@ export async function withTransaction<T>(work: (q: TxQuery) => Promise<T>): Prom
   }
 }
 
+/**
+ * Comme `withTransaction`, mais sur une base société EXPLICITE (routage par
+ * requête, en-tête X-Societe-Db) au lieu de la société active globale.
+ */
+export async function withTransactionOn<T>(database: string, work: (q: TxQuery) => Promise<T>): Promise<T> {
+  const pool = await getPoolForDatabase(database);
+  const tx = new mssql.Transaction(pool);
+  await tx.begin();
+  const q: TxQuery = async (sql, params = {}) => {
+    const request = new mssql.Request(tx);
+    for (const [name, value] of Object.entries(params)) request.input(name, value);
+    const result = await request.query(DMY + sql);
+    return result.recordset as never;
+  };
+  try {
+    const result = await work(q);
+    await tx.commit();
+    return result;
+  } catch (err) {
+    await tx.rollback().catch(() => undefined);
+    throw err;
+  }
+}
+
 export { mssql };
